@@ -4,17 +4,22 @@
   "private": true,
   "scripts": {
     "dev": "npm run dev:web",
-    "build": "NEXT_DIST_DIR=.next-live TZ=Australia/Melbourne next build",
-    "analyze": "ANALYZE=true NEXT_DIST_DIR=.next-live next build",
-    "start": "NEXT_DIST_DIR=.next-live TZ=Australia/Melbourne next start",
+    "build": "prisma generate && prisma migrate deploy && TZ=Australia/Melbourne next build",
+    "analyze": "ANALYZE=true next build",
+    "start": "TZ=Australia/Melbourne next start",
     "lint": "next lint",
     "secrets:scan": "gitleaks detect --source . --redact --config .gitleaks.toml",
     "hooks:install": "git config core.hooksPath .githooks",
     "dev:3010": "NEXT_DIST_DIR=.next-dev TZ=Australia/Melbourne next dev -p 3010",
-    "dev:web": "NEXT_DIST_DIR=.next-dev TZ=Australia/Melbourne next dev -H 0.0.0.0 -p 3010"
+    "dev:web": "NEXT_DIST_DIR=.next-dev TZ=Australia/Melbourne next dev -H 0.0.0.0 -p 3010",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:migrate:dev": "prisma migrate dev",
+    "db:import-runtime": "node scripts/import-runtime-documents.js"
   },
   "dependencies": {
     "@nextui-org/react": "^1.0.0-beta.10",
+    "@prisma/client": "^5.22.0",
     "apexcharts": "^3.35.5",
     "formidable": "^3.5.4",
     "next": "12.3.0",
@@ -33,6 +38,7 @@
     "concurrently": "^9.0.0",
     "eslint": "8.23.1",
     "eslint-config-next": "12.3.0",
+    "prisma": "^5.22.0",
     "typescript": "4.8.3"
   }
 }
