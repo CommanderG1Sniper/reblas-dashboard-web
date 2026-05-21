@@ -1,0 +1,12 @@
+[Unit]
+Description=Run Reblas Dashboard live web watchdog every 5 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+Unit=reblas-dashboard-live-watchdog.user.service
+
+[Install]
+WantedBy=timers.target
+

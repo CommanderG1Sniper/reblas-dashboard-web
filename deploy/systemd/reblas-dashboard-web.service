@@ -1,0 +1,23 @@
+[Unit]
+Description=Reblas Dashboard Web (Next.js)
+After=network.target
+
+[Service]
+Type=simple
+User=australis
+Group=australis
+WorkingDirectory=/projects/reblas-crew-dashboard
+Environment=NODE_ENV=production
+Environment=TZ=Australia/Melbourne
+Environment=REBLAS_DATA_DIR=/home/australis/.reblas-dashboard-data
+Environment=PORT=3020
+Environment=HOST=127.0.0.1
+EnvironmentFile=-/projects/reblas-crew-dashboard/.env.local
+ExecStart=/usr/bin/npm run start -- --hostname 127.0.0.1 --port 3020
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

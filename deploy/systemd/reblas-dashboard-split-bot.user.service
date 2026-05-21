@@ -1,0 +1,19 @@
+[Unit]
+Description=Reblas Dashboard Split Sandbox Bot
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/projects/reblas-crew-dashboard-split
+Environment=NODE_ENV=development
+Environment=TZ=Australia/Melbourne
+Environment=REBLAS_DATA_DIR=%h/.reblas-dashboard-data-split
+EnvironmentFile=-/projects/reblas-crew-dashboard-split/.env.local
+ExecStart=/usr/bin/npm run bot
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

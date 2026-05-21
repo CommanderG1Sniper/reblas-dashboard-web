@@ -1,0 +1,38 @@
+{
+  "name": "reblas-dashboard-web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev:web",
+    "build": "NEXT_DIST_DIR=.next-live TZ=Australia/Melbourne next build",
+    "analyze": "ANALYZE=true NEXT_DIST_DIR=.next-live next build",
+    "start": "NEXT_DIST_DIR=.next-live TZ=Australia/Melbourne next start",
+    "lint": "next lint",
+    "secrets:scan": "gitleaks detect --source . --redact --config .gitleaks.toml",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "dev:3010": "NEXT_DIST_DIR=.next-dev TZ=Australia/Melbourne next dev -p 3010",
+    "dev:web": "NEXT_DIST_DIR=.next-dev TZ=Australia/Melbourne next dev -H 0.0.0.0 -p 3010"
+  },
+  "dependencies": {
+    "@nextui-org/react": "^1.0.0-beta.10",
+    "apexcharts": "^3.35.5",
+    "formidable": "^3.5.4",
+    "next": "12.3.0",
+    "next-auth": "^4.24.13",
+    "next-themes": "^0.2.1",
+    "react": "18.2.0",
+    "react-apexcharts": "^1.4.0",
+    "react-dom": "18.2.0",
+    "react-icons": "^4.12.0"
+  },
+  "devDependencies": {
+    "@next/bundle-analyzer": "^16.1.6",
+    "@types/node": "18.7.18",
+    "@types/react": "18.0.20",
+    "@types/react-dom": "18.0.6",
+    "concurrently": "^9.0.0",
+    "eslint": "8.23.1",
+    "eslint-config-next": "12.3.0",
+    "typescript": "4.8.3"
+  }
+}

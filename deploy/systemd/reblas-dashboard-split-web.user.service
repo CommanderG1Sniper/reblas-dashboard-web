@@ -1,0 +1,21 @@
+[Unit]
+Description=Reblas Dashboard Split Sandbox Web
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/projects/reblas-dashboard-web
+Environment=NODE_ENV=development
+Environment=TZ=Australia/Melbourne
+Environment=REBLAS_DATA_DIR=%h/.reblas-dashboard-data-split
+Environment=PORT=3010
+Environment=HOST=127.0.0.1
+EnvironmentFile=-/projects/reblas-dashboard-web/.env.local
+ExecStart=/usr/bin/npm run dev:web -- --hostname 127.0.0.1 --port 3010
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

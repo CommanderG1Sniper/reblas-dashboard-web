@@ -1,0 +1,233 @@
+html,
+body {
+   padding: 0;
+   margin: 0;
+   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+   color: var(--reblas-text-primary, #f8fafc);
+   background: #020617;
+   color-scheme: dark;
+}
+
+:root {
+  --reblas-text-primary: #ffffff;
+  --reblas-text-muted: rgba(255,255,255,0.96);
+  --reblas-surface-soft: rgba(255,255,255,0.04);
+  --reblas-surface-card: rgba(0,0,0,0.14);
+  --reblas-surface-strong: rgba(0,0,0,0.26);
+  --reblas-page-overlay: rgba(0,0,0,0.22);
+  --reblas-button-bg: rgba(0,0,0,0.35);
+  --reblas-button-hover-bg: rgba(0,0,0,0.50);
+  --reblas-table-odd: rgba(255,255,255,0.035);
+  --reblas-table-even: rgba(255,255,255,0.015);
+  --reblas-table-hover: rgba(255,255,255,0.06);
+  --reblas-native-bg: rgba(0,0,0,0.28);
+  --reblas-native-text: #ffffff;
+  --reblas-native-border: rgba(255,255,255,0.22);
+  --reblas-native-option-bg: #0b0b0b;
+  --reblas-native-option-text: #ffffff;
+  --reblas-panel-blur: 16px;
+  --reblas-soft-blur: 14px;
+}
+
+* {
+   box-sizing: border-box;
+}
+
+/* REBLAS_BUTTON_THEME_START */
+.nextui-button {
+  --reblas-btn-color: var(--reblas-btn1-color);
+  background: var(--reblas-button-bg) !important;
+  border: 1px solid var(--reblas-btn-color) !important;
+  color: var(--reblas-btn-color) !important;
+  border-radius: 12px !important;
+  box-shadow: none !important;
+  backdrop-filter: blur(var(--reblas-soft-blur, 14px));
+}
+.nextui-button:hover {
+  background: var(--reblas-button-hover-bg) !important;
+}
+.nextui-button:active {
+  transform: translateY(1px);
+}
+.nextui-button .nextui-button-text {
+  color: var(--reblas-btn-color) !important;
+  font-weight: 800 !important;
+}
+/* Per-style overrides (assign via className="reblas-btn-2" etc.) */
+.nextui-button.reblas-btn-1 { --reblas-btn-color: var(--reblas-btn1-color); }
+.nextui-button.reblas-btn-2 { --reblas-btn-color: var(--reblas-btn2-color); }
+.nextui-button.reblas-btn-3 { --reblas-btn-color: var(--reblas-btn3-color); }
+.nextui-button.reblas-btn-4 { --reblas-btn-color: var(--reblas-btn4-color); }
+/* REBLAS_BUTTON_THEME_END */
+
+
+
+/* Reblas: zebra striping for NextUI tables */
+.nextui-table tbody tr:nth-child(odd) td {
+  background: var(--reblas-table-odd);
+}
+
+.nextui-table tbody tr:nth-child(even) td {
+  background: var(--reblas-table-even);
+}
+
+.nextui-table tbody tr:hover td {
+  background: var(--reblas-table-hover);
+}
+
+
+/* Reblas: hide scrollbars (keep scrolling) */
+html, body {
+  -ms-overflow-style: none; /* IE/Edge legacy */
+  scrollbar-width: none;    /* Firefox */
+}
+html::-webkit-scrollbar, body::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+/* Optional: use this class on any scrollable div you also want hidden */
+.reblas-scrollhide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.reblas-scrollhide::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+}
+
+
+/* Reblas: hide ALL scrollbars (keep scrolling) */
+/* Firefox */
+* {
+  scrollbar-width: none !important;
+}
+
+/* Chrome/Safari/Edge */
+*::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+}
+
+/* Reblas: dark dropdown list for native <select> */
+.reblas-select {
+  background: var(--reblas-native-bg);
+  color: var(--reblas-native-text);
+  border: 1px solid var(--reblas-native-border);
+}
+
+/* The opened list (works in many browsers; some OS themes may still override) */
+.reblas-select option {
+  background-color: var(--reblas-native-option-bg);
+  color: var(--reblas-native-option-text);
+}
+
+body,
+.nextui-text,
+.nextui-text-child,
+.nextui-card,
+.nextui-navbar,
+.nextui-navbar-link,
+.nextui-modal,
+.nextui-modal-wrapper,
+.nextui-modal-header,
+.nextui-modal-body,
+.nextui-modal-footer,
+.nextui-modal-close-icon,
+.nextui-modal-close-icon svg,
+.nextui-table,
+.nextui-table-column-header,
+.nextui-table-pagination,
+.nextui-table-footer,
+.nextui-dropdown-menu,
+.nextui-dropdown-section-title,
+.nextui-dropdown-item,
+.nextui-dropdown-item-description,
+.nextui-popover-content-container,
+.nextui-popover-content,
+.nextui-tooltip-content,
+.nextui-collapse,
+.nextui-collapse-title,
+.nextui-collapse-subtitle,
+.nextui-checkbox-text,
+.nextui-checkbox-group-label,
+.nextui-radio-group-label,
+.nextui-radio-description,
+.nextui-input-label,
+.nextui-input-helper-text,
+.nextui-input-helper-text-container,
+.nextui-input-content-left,
+.nextui-input-content-right,
+.nextui-input input,
+.nextui-input textarea {
+  color: var(--reblas-text-primary) !important;
+}
+
+.nextui-text,
+.nextui-text-child,
+.nextui-navbar-link,
+.nextui-modal-header,
+.nextui-modal-body,
+.nextui-modal-footer,
+.nextui-table-column-header,
+.nextui-table-pagination,
+.nextui-table-footer,
+.nextui-dropdown-section-title,
+.nextui-dropdown-item,
+.nextui-dropdown-item-description,
+.nextui-collapse-title,
+.nextui-collapse-subtitle,
+.nextui-checkbox-text,
+.nextui-checkbox-group-label,
+.nextui-radio-group-label,
+.nextui-radio-description,
+.nextui-input-label,
+.nextui-input-helper-text,
+.nextui-input-helper-text-container,
+.nextui-input-content-left,
+.nextui-input-content-right {
+  opacity: 1 !important;
+}
+
+select,
+textarea,
+input:not([type='color']):not([type='checkbox']):not([type='radio']) {
+  color: var(--reblas-native-text) !important;
+  border-color: var(--reblas-native-border) !important;
+  caret-color: var(--reblas-native-text);
+}
+
+select,
+textarea {
+  background: var(--reblas-native-bg) !important;
+}
+
+select option,
+select optgroup {
+  background: var(--reblas-native-option-bg) !important;
+  color: var(--reblas-native-option-text) !important;
+}
+
+select option:checked,
+select option:hover,
+select option:focus {
+  background: #111827 !important;
+  color: #ffffff !important;
+}
+
+input::placeholder,
+textarea::placeholder {
+  color: var(--reblas-text-muted) !important;
+  opacity: 1;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "gitleaks is required for pre-commit secret scanning."
+  echo "Install it from https://github.com/gitleaks/gitleaks and retry."
+  exit 1
+fi
+
+staged_files="$(git diff --cached --name-only --diff-filter=ACMR)"
+if [ -z "$staged_files" ]; then
+  exit 0
+fi
+
+tmp_dir="$(mktemp -d)"
+cleanup() {
+  rm -rf "$tmp_dir"
+}
+trap cleanup EXIT
+
+while IFS= read -r file; do
+  [ -z "$file" ] && continue
+  [ -f "$file" ] || continue
+  mkdir -p "$tmp_dir/$(dirname "$file")"
+  cp "$file" "$tmp_dir/$file"
+done <<< "$staged_files"
+
+gitleaks detect --source "$tmp_dir" --no-git --redact --config .gitleaks.toml
+

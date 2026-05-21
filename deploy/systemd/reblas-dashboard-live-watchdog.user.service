@@ -1,0 +1,7 @@
+[Unit]
+Description=Reblas Dashboard Live Web Watchdog (user)
+
+[Service]
+Type=oneshot
+ExecStart=/projects/reblas-crew-dashboard/scripts/check-live-web.sh
+

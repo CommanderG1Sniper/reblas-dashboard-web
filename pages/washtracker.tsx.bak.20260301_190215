@@ -1,0 +1,2243 @@
+import type {NextPage} from 'next';
+import React, {useEffect, useMemo, useState} from 'react';
+import {Avatar, Button, Card, Input, Modal, Spacer, Text} from '@nextui-org/react';
+
+import {MdPaid, MdOutlinePendingActions, MdDelete} from 'react-icons/md';
+import {FaEdit} from 'react-icons/fa';
+import {GiReceiveMoney, GiPayMoney} from 'react-icons/gi';
+type Member = {
+  id: string;
+  displayName?: string;
+  nick?: string;
+  globalName?: string;
+  username?: string;
+  avatarUrl?: string;
+  rolesSorted?: string[];
+  roles?: string[];
+};
+
+type MembersPayload = {
+  members?: Member[];
+  roleMap?: Record<string, {name: string; position: number; color?: number}>;
+};
+
+type WashEntry = {
+  id: string;
+  memberId: string;
+  washRatePct: number;
+  dirtyCents: number;
+  cleanCents: number;
+  status: 'collected' | 'pending' | 'paid';
+  createdAt: string;
+};
+
+type WeekPayload = {
+  weekEnding: string; // YYYY-MM-DD
+  label: string; // "Current Week" or YYYY-MM-DD
+  suggestedWashRatePct: number;
+  entries: WashEntry[];
+  totals: {dirtyCents: number; cleanCents: number};
+};
+
+type TotalsRow = {
+  memberId: string;
+  dirtyCents: number;
+  cleanCents: number;
+  entryCount: number;
+  lastWeekEnding: string;
+};
+
+type WashTotalsPayload = {
+  upto: string | null;
+  members: TotalsRow[];
+  totals: {dirtyCents: number; cleanCents: number; entryCount: number};
+};
+
+type MemberHistoryPayload = {
+  memberId: string;
+  totals: {dirtyCents: number; cleanCents: number; entryCount: number};
+  entries: Array<{
+    weekEnding: string;
+    id: string;
+    washRatePct: number;
+    dirtyCents: number;
+    cleanCents: number;
+    status: 'collected' | 'pending' | 'paid';
+    createdAt: string;
+  }>;
+};
+
+const glassCardCss = {
+  p: '$10',
+  background: 'rgba(0,0,0,0.14)',
+  border: '1px solid var(--reblas-outline)',
+  backdropFilter: 'blur(16px)',
+};
+
+function formatCentsWhole(cents: number) {
+  const n = Number(cents || 0) / 100;
+  try {
+    return n.toLocaleString(undefined, {style: 'currency', currency: 'USD', minimumFractionDigits: 0, maximumFractionDigits: 0});
+  } catch {
+    return `$${n.toFixed(0)}`;
+  }
+}
+
+function formatCents(cents: number) {
+  const n = Math.round(Number(cents || 0) / 100);
+  try {
+    return n.toLocaleString(undefined, {style: 'currency', currency: 'USD', maximumFractionDigits: 0});
+  } catch {
+    return `$${n.toLocaleString()}`;
+  }
+}
+
+function parseMoneyToCents(raw: string) {
+  const cleaned = String(raw || '').trim().replace(/[^0-9.]/g, '');
+  if (!cleaned) return 0;
+  const n = Number(cleaned);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.round(n * 100);
+}
+
+function calcCleanCents(dirtyCents: number, washRatePct: number) {
+  const keepPct = 100 - washRatePct;
+  return Math.round((dirtyCents * keepPct) / 100);
+}
+
+function addDaysYMD(ymd: string, deltaDays: number) {
+  const [y, m, d] = ymd.split('-').map((x) => Number(x));
+  const dt = new Date(y, (m || 1) - 1, d || 1, 12, 0, 0, 0);
+  dt.setDate(dt.getDate() + deltaDays);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+function weekEndingSundayLocal(now = new Date()) {
+  const d = new Date(now);
+  d.setHours(12, 0, 0, 0);
+  const dow = d.getDay(); // 0=Sun
+  const add = (7 - dow) % 7;
+  d.setDate(d.getDate() + add);
+  const yy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+function displayNameOf(m?: Member) {
+  if (!m) return '';
+  return String(m.displayName || m.nick || m.globalName || m.username || m.id);
+}
+
+function rankNameFor(m: Member, roleMap: Record<string, any>) {
+  const ids = (m.rolesSorted || m.roles || []) as string[];
+  const top = ids[0];
+  if (!top) return '';
+  return String(roleMap?.[top]?.name || '').trim();
+}
+
+const WashTracker: NextPage = () => {
+  // Default view: totals
+  const [view, setView] = useState<'totals' | 'week'>('week');
+
+  const [membersPayload, setMembersPayload] = useState<MembersPayload>({});
+  const [membersExcludeRoleIds, setMembersExcludeRoleIds] = useState<string[]>([]);
+
+  const [membersErr, setMembersErr] = useState('');
+
+  const memberMap = useMemo(() => {
+    const map = new Map<string, Member>();
+    for (const m of membersPayload.members || []) map.set(String(m.id), m);
+    return map;
+  }, [membersPayload]);
+
+  const roleMap = membersPayload.roleMap || {};
+
+  const excludedRoleSet = useMemo(() => new Set((membersExcludeRoleIds || []).map((x) => String(x || '').trim())), [membersExcludeRoleIds]);
+
+  const filteredMembersForWash = useMemo(() => {
+    const list = membersPayload.members || [];
+    if (!excludedRoleSet.size) return list;
+
+    return list.filter((m) => {
+      const roles = (m.rolesSorted || m.roles || []) as string[];
+      for (const rid of roles) {
+        if (excludedRoleSet.has(String(rid))) return false;
+      }
+      return true;
+    });
+  }, [membersPayload.members, excludedRoleSet]);
+
+
+  const [weekEnding, setWeekEnding] = useState<string>(''); // '' = current week
+  const [weekData, setWeekData] = useState<WeekPayload | null>(null);
+  const [weekErr, setWeekErr] = useState('');
+  const [weekLoading, setWeekLoading] = useState(false);
+
+  const [allTotals, setAllTotals] = useState<WashTotalsPayload | null>(null);
+  const [totalsErr, setTotalsErr] = useState('');
+  const [totalsLoading, setTotalsLoading] = useState(false);
+
+  // Member history modal
+  const [memberOpen, setMemberOpen] = useState(false);
+  const [memberLoading, setMemberLoading] = useState(false);
+  const [memberErr, setMemberErr] = useState('');
+  const [memberHistory, setMemberHistory] = useState<MemberHistoryPayload | null>(null);
+  const [memberSelectedId, setMemberSelectedId] = useState('');
+
+  // Add Wash modal
+  const [addOpen, setAddOpen] = useState(false);
+  const [formMemberId, setFormMemberId] = useState('');
+  const [formWashRate, setFormWashRate] = useState<number>(25);
+  const [formDirty, setFormDirty] = useState('');
+  const [formErr, setFormErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  // Edit mode (re-uses Add Wash modal)
+  const [isEditing, setIsEditing] = useState(false);
+  const [editEntryId, setEditEntryId] = useState('');
+
+  
+
+  // Confirm "Mark Pending" modal
+  const [confirmPendingOpen, setConfirmPendingOpen] = useState(false);
+  const [confirmPendingEntryId, setConfirmPendingEntryId] = useState('');
+
+  // Confirm "Delete" modal
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [confirmDeleteEntryId, setConfirmDeleteEntryId] = useState('');
+
+const currentWeekEnding = useMemo(() => weekEndingSundayLocal(new Date()), []);
+  const effectiveWeekEnding = weekData?.weekEnding || (weekEnding ? weekEnding : currentWeekEnding);
+  const effectiveLabel =
+    weekData?.label || (effectiveWeekEnding === currentWeekEnding ? 'Current Week' : effectiveWeekEnding);
+
+  
+  const fetchMemberSettings = async () => {
+    try {
+      const res = await fetch('/api/members/settings');
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load members settings (${res.status})`);
+      const list = Array.isArray(j?.membersExcludeRoleIds) ? j.membersExcludeRoleIds.map((x: any) => String(x || '').trim()) : [];
+      setMembersExcludeRoleIds(list.filter(Boolean));
+    } catch {
+      setMembersExcludeRoleIds([]);
+    }
+  };
+
+  const fetchMembers = async () => {
+    setMembersErr('');
+    try {
+      const res = await fetch('/api/members/list');
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load members (${res.status})`);
+      setMembersPayload(j as MembersPayload);
+    } catch (e: any) {
+      setMembersErr(e?.message || 'Failed to load members');
+      setMembersPayload({});
+    }
+  };
+
+  const fetchWeek = async (targetWeekEnding: string) => {
+    setWeekErr('');
+    setWeekLoading(true);
+    try {
+      const qs = targetWeekEnding ? `?weekEnding=${encodeURIComponent(targetWeekEnding)}` : '';
+      const res = await fetch(`/api/wash/week${qs}`);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load week (${res.status})`);
+      setWeekData(j as WeekPayload);
+    } catch (e: any) {
+      setWeekErr(e?.message || 'Failed to load wash week');
+      setWeekData(null);
+    } finally {
+      setWeekLoading(false);
+    }
+  };
+
+  const fetchAllTotals = async () => {
+    setTotalsErr('');
+    setTotalsLoading(true);
+    try {
+      const res = await fetch('/api/wash/totals'); // all-time totals across all weeks
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load totals (${res.status})`);
+      setAllTotals(j as WashTotalsPayload);
+    } catch (e: any) {
+      setTotalsErr(e?.message || 'Failed to load totals');
+      setAllTotals(null);
+    } finally {
+      setTotalsLoading(false);
+    }
+  };
+
+  const reloadMemberHistory = async (memberId: string) => {
+    if (!memberId) return;
+    setMemberErr('');
+    setMemberLoading(true);
+    try {
+      const res = await fetch(`/api/wash/member?memberId=${encodeURIComponent(memberId)}`);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load member history (${res.status})`);
+      setMemberHistory(j as MemberHistoryPayload);
+    } catch (e: any) {
+      setMemberErr(e?.message || 'Failed to load member history');
+      setMemberHistory(null);
+    } finally {
+      setMemberLoading(false);
+    }
+  };
+
+  const openMember = async (memberId: string) => {
+    setMemberHistory(null);
+    setMemberOpen(true);
+    setMemberSelectedId(memberId);
+    await reloadMemberHistory(memberId);
+  };
+
+  useEffect(() => {
+    void fetchMembers();
+    void fetchMemberSettings();
+  }, []);
+
+  useEffect(() => {
+    // keep week data fresh (used when user switches to week view)
+    void fetchWeek(weekEnding);
+  }, [weekEnding]);
+
+  useEffect(() => {
+    if (view === 'totals') void fetchAllTotals();
+  }, [view]);
+
+  const onPrevWeek = () => {
+    if (view !== 'week') return;
+    const next = addDaysYMD(effectiveWeekEnding, -7);
+    setWeekEnding(next === currentWeekEnding ? '' : next);
+  };
+
+  const onNextWeek = () => {
+    if (view !== 'week') return;
+    const next = addDaysYMD(effectiveWeekEnding, 7);
+    setWeekEnding(next === currentWeekEnding ? '' : next);
+  };
+
+  const openAdd = () => {
+    setFormErr('');
+      setIsEditing(false);
+      setEditEntryId('');
+    setFormDirty('');
+    setFormMemberId('');
+    setFormWashRate(Number(weekData?.suggestedWashRatePct ?? 25));
+    setAddOpen(true);
+  };
+
+const openEdit = (entry: any) => {
+      if (!entry) return;
+      if (String(entry?.status || '') !== 'collected') return; // UI already disables, extra guard
+      setFormErr('');
+      setIsEditing(true);
+      setEditEntryId(String(entry?.id || '').trim());
+      setFormMemberId(String(entry?.memberId || '').trim());
+      setFormWashRate(Number(entry?.washRatePct ?? 25));
+      // dirty is stored as cents; convert to dollars string for the input
+      const dirtyCents = Number(entry?.dirtyCents || 0) || 0;
+      setFormDirty(String(Math.round(dirtyCents / 100)));
+      setAddOpen(true);
+    };
+
+  const dirtyCents = Math.round((parseMoneyToCents(formDirty) || 0) / 100) * 100;
+  const cleanCents = Math.round((calcCleanCents(dirtyCents, Number(formWashRate || 0)) || 0) / 100) * 100;
+
+  const saveUpsert = async () => {
+      setFormErr('');
+      if (!formMemberId) return setFormErr('Pick a member.');
+      if (dirtyCents <= 0) return setFormErr('Dirty amount must be > 0.');
+      const rate = Math.max(0, Math.min(100, Math.floor(Number(formWashRate || 0))));
+
+      setSaving(true);
+      try {
+        const qs = `?weekEnding=${encodeURIComponent(effectiveWeekEnding)}`;
+
+        if (isEditing) {
+          const id = String(editEntryId || '').trim();
+          if (!id) throw new Error('Missing entryId for edit');
+
+          const res = await fetch(`/api/wash/week${qs}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              entryId: id,
+              action: 'edit',
+              washRatePct: rate,
+              dirtyAmount: formDirty,
+            }),
+          });
+
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(j?.error || `Failed to edit wash (${res.status})`);
+        } else {
+          const res = await fetch(`/api/wash/week${qs}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              memberId: formMemberId,
+              washRatePct: rate,
+              dirtyAmount: formDirty,
+            }),
+          });
+
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(j?.error || `Failed to add wash (${res.status})`);
+        }
+
+        setAddOpen(false);
+        setIsEditing(false);
+        setEditEntryId('');
+        await fetchWeek(weekEnding);
+        await fetchAllTotals();
+        if (memberOpen && memberSelectedId) await reloadMemberHistory(memberSelectedId);
+      } catch (e: any) {
+        setFormErr(e?.message || (isEditing ? 'Failed to edit wash' : 'Failed to add wash'));
+      } finally {
+        setSaving(false);
+      }
+    };
+
+  
+  const setEntryStatus = async (entryId: string, status: 'pending' | 'paid') => {
+    try {
+      const qs = `?weekEnding=${encodeURIComponent(effectiveWeekEnding)}`;
+      const res = await fetch(`/api/wash/week${qs}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({entryId, status}),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to update status (${res.status})`);
+
+      await fetchWeek(weekEnding);
+      await fetchAllTotals();
+    if (memberOpen && memberSelectedId) await reloadMemberHistory(memberSelectedId);
+    } catch (e: any) {
+      setWeekErr(e?.message || 'Failed to update status');
+    }
+  };
+
+  const deleteEntry = async (entryId: string) => {
+    if (!entryId) return;
+    try {
+      const qs = `?weekEnding=${encodeURIComponent(effectiveWeekEnding)}`;
+      const res = await fetch(`/api/wash/week${qs}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({entryId, action: 'delete'}),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to delete (${res.status})`);
+
+      await fetchWeek(weekEnding);
+      await fetchAllTotals();
+    if (memberOpen && memberSelectedId) await reloadMemberHistory(memberSelectedId);
+    } catch (e: any) {
+      setWeekErr(e?.message || 'Failed to delete');
+    }
+  };
+
+
+  const openConfirmPending = (entry: any) => {
+    if (!entry) return;
+    setConfirmPendingEntryId(String(entry.id || ''));
+    setConfirmPendingOpen(true);
+  };
+
+  const confirmMarkPending = async () => {
+    const id = String(confirmPendingEntryId || '').trim();
+    setConfirmPendingOpen(false);
+    if (!id) return;
+    await setEntryStatus(id, 'pending');
+  };
+
+  const openConfirmDelete = (entry: any) => {
+    if (!entry) return;
+    setConfirmDeleteEntryId(String(entry.id || ''));
+    setConfirmDeleteOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    const id = String(confirmDeleteEntryId || '').trim();
+    setConfirmDeleteOpen(false);
+    if (!id) return;
+    await deleteEntry(id);
+  };
+
+
+
+  const colCard: React.CSSProperties = {
+    border: '1px solid var(--reblas-outline)',
+    borderRadius: 14,
+    overflow: 'hidden',
+    background: 'rgba(0,0,0,0.10)',
+  };
+
+  const headerCell: React.CSSProperties = {
+    padding: '12px 14px 10px',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    background: 'rgba(255,255,255,0.03)',
+  };
+
+  const rowH = 62;
+  const rowBase: React.CSSProperties = {
+    height: rowH,
+    padding: '6px 12px',
+    display: 'flex',
+    alignItems: 'center',
+    borderBottom: '1px solid rgba(255,255,255,0.06)',
+  };
+
+  const stripeBg = 'rgba(255,255,255,0.03)';
+  const clearBg = 'transparent';
+
+  const entries = weekData?.entries || [];
+  const weekTotals = weekData?.totals || {dirtyCents: 0, cleanCents: 0};
+
+  return (
+    <div style={{padding: 22}}>
+      <Card css={glassCardCss}>
+        {/* Title ABOVE everything */}
+        <Text h3 css={{mb: 0}}>Wash Tracker</Text>
+        <Spacer y={0.5} />
+
+        {/* Controls row (swapped): arrows + date text, then Totals/Week */}
+          <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap'}}>
+            {/* Left: view buttons ALWAYS at far-left, then either week nav or totals label */}
+            <div style={{display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap'}}>
+              <Button
+                auto
+                className={view === 'week' ? 'reblas-btn-2' : 'reblas-btn-1'}
+                onPress={() => setView('week')}
+              >
+                Week
+              </Button>
+
+              <Button
+                auto
+                className={view === 'totals' ? 'reblas-btn-2' : 'reblas-btn-1'}
+                onPress={() => setView('totals')}
+              >
+                Totals
+              </Button>
+
+              {view === 'week' ? (
+                <>
+                  <Button auto className="reblas-btn-1" onPress={onPrevWeek} aria-label="Previous week">
+                    ◀
+                  </Button>
+
+                  <Text size="$sm" css={{opacity: 0.85, mb: 0}}>
+                    {effectiveLabel} • Week ending {effectiveWeekEnding}
+                  </Text>
+
+                  <Button auto className="reblas-btn-1" onPress={onNextWeek} aria-label="Next week">
+                    ▶
+                  </Button>
+                </>
+              ) : (
+                <Text size="$sm" css={{opacity: 0.85, mb: 0}}>
+                  All-time totals (members who have ever been added)
+                </Text>
+              )}
+            </div>
+
+            {/* Right: Week-only totals + Add wash */}
+            {view === 'week' ? (
+              <div style={{display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap'}}>
+                <div style={{display: 'flex', gap: 12, alignItems: 'baseline'}}>
+                  <div style={{textAlign: 'right', paddingRight: 12, marginRight: 12, borderRight: '1px solid rgba(255,255,255,0.10)'}}>
+                  <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Week total dirty</Text>
+                    <Text b css={{mb: 0, color: 'var(--reblas-btn4-color)', whiteSpace: 'nowrap'}}>{formatCentsWhole(weekTotals.dirtyCents)}</Text>
+                  </div>
+                  <div style={{textAlign: 'right'}}>
+                  <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Week total clean</Text>
+                    <Text b css={{mb: 0, color: 'var(--reblas-btn2-color)', whiteSpace: 'nowrap'}}>{formatCentsWhole(weekTotals.cleanCents)}</Text>
+                  </div>
+                </div>
+
+                <Button className="reblas-btn-4" auto onPress={openAdd}>
+                  Add wash
+                </Button>
+              </div>
+            ) : null}
+          </div>
+
+
+
+        <Spacer y={0.8} />
+
+        {membersErr ? <Text size="$sm" css={{opacity: 0.8}}>Members load error: {membersErr}</Text> : null}
+
+        {/* TOTALS VIEW (default) */}
+        {view === 'totals' ? (
+          <>
+            {totalsErr ? (
+              <Card css={{p: '$8', mb: '$8', background: 'rgba(120,0,0,0.25)', border: '1px solid var(--reblas-outline)'}}>
+                <Text b>Error</Text>
+                <Text size="$sm" css={{opacity: 0.9}}>{totalsErr}</Text>
+              </Card>
+            ) : null}
+            <div style={{overflowX: 'auto'}}>
+              <div
+                style={{
+                  minWidth: 820,
+                  display: 'grid',
+                  gridTemplateColumns: '320px 1fr',
+                  gap: 12,
+                  alignItems: 'start',
+                }}
+              >
+                {/* MEMBERS COLUMN */}
+                <div style={colCard}>
+                  <div style={headerCell}>
+                    <Text b css={{mb: 0}}>Members</Text>
+                  </div>
+
+                  {totalsLoading ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+                    </div>
+                  ) : !allTotals || !Array.isArray(allTotals.members) || allTotals.members.length === 0 ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>No wash entries yet.</Text>
+                    </div>
+                  ) : (
+                    allTotals.members.map((r, idx) => {
+                      const m = memberMap.get(String(r.memberId));
+                      const bg = idx % 2 === 1 ? stripeBg : clearBg;
+                      const rank = m ? rankNameFor(m, roleMap) : '';
+
+                      return (
+                        <div
+                          key={r.memberId}
+                          onClick={() => openMember(String(r.memberId))}
+                          style={{...rowBase, background: bg, gap: 12, cursor: 'pointer'}}
+                        >
+                          <Avatar
+                            src={m?.avatarUrl || undefined}
+                            size="md"
+                            css={{boxShadow: '0 0 0 1px var(--reblas-outline)'}}
+                          />
+                          <div style={{display: 'flex', flexDirection: 'column', lineHeight: 1.15, minWidth: 0}}>
+                            <Text b css={{mb: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>
+                              {m ? displayNameOf(m) : r.memberId}
+                            </Text>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* TOTALS / NUMBERS COLUMN */}
+                <div style={colCard}>
+                  <div style={headerCell}>
+                    <Text b css={{mb: 0}}>Totals</Text>
+                  </div>
+
+                  {totalsLoading ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+                    </div>
+                  ) : !allTotals || !Array.isArray(allTotals.members) || allTotals.members.length === 0 ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>—</Text>
+                    </div>
+                  ) : (
+                    allTotals.members.map((r, idx) => {
+                      const bg = idx % 2 === 1 ? stripeBg : clearBg;
+
+                      return (
+                        <div
+                          key={'totals_' + r.memberId}
+                          onClick={() => openMember(String(r.memberId))}
+                          style={{...rowBase, background: bg, cursor: 'pointer'}}
+                        >
+                          <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 90px 140px', gap: 12, width: '100%'}}>
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: '0 12px',
+                                height: '100%', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Total Dirty</Text>
+                              <Text b css={{mb: 0}}>{formatCentsWhole(r.dirtyCents)}</Text>
+                            </div>
+
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Total Clean</Text>
+                              <Text b css={{mb: 0}}>{formatCentsWhole(r.cleanCents)}</Text>
+                            </div>
+
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Entries</Text>
+                              <Text b css={{mb: 0}}>{r.entryCount}</Text>
+                            </div>
+
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'flex-end'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Last Week</Text>
+                              <Text b css={{mb: 0}}>{r.lastWeekEnding}</Text>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+        {/* WEEK VIEW */}
+        {view === 'week' ? (
+          <>
+            {weekErr ? (
+              <Card css={{p: '$8', mb: '$8', background: 'rgba(120,0,0,0.25)', border: '1px solid var(--reblas-outline)'}}>
+                <Text b>Error</Text>
+                <Text size="$sm" css={{opacity: 0.9}}>{weekErr}</Text>
+              </Card>
+            ) : null}
+
+            <div style={{overflowX: 'auto'}}>
+              <div style={{minWidth: 980}}>
+                <div style={colCard}>
+                  {/* ONE combined header */}
+                  <div style={{...headerCell, padding: '10px 0'}}>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '320px 1fr 1fr 1fr 1fr 190px',
+                        gap: 0,
+                        alignItems: 'stretch',
+                      }}
+                    >
+                      <div style={{display: 'flex', alignItems: 'center', height: '100%', padding: '0 14px', gap: 12}}>
+  <div style={{width: 28, height: 28}} />
+  <Text b css={{mb: 0}}>Members</Text>
+</div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Dirty Collected
+                        </Text>
+                      </div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Clean Returned
+                        </Text>
+                      </div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Rate
+                        </Text>
+                      </div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Status
+                        </Text>
+                      </div>
+
+                      <div style={{borderLeft: '1px solid rgba(255,255,255,0.08)', height: '100%'}} />
+                    </div>
+                  </div>
+
+                  {/* ONE combined body */}
+                  {weekLoading ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+                    </div>
+                  ) : entries.length === 0 ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>No entries for this week.</Text>
+                    </div>
+                  ) : (
+                    entries.map((e, idx) => {
+                      const m = memberMap.get(String(e.memberId));
+                      const bg = idx % 2 === 1 ? stripeBg : clearBg;
+
+                      return (
+                        <div key={e.id} style={{...rowBase, padding: 0, background: bg}}>
+                          <div
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: '320px 1fr 1fr 1fr 1fr 190px',
+                              gap: 0,
+                              width: '100%',
+                              alignItems: 'stretch',
+                            }}
+                          >
+                            {/* Member cell */}
+                            <div style={{display: 'flex', alignItems: 'center', gap: 12, padding: '0 14px', minWidth: 0}}>
+                              <Avatar
+                                src={m?.avatarUrl || undefined}
+                                size="xs"
+                                css={{boxShadow: '0 0 0 1px var(--reblas-outline)'}}
+                              />
+                              <Text b css={{mb: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>
+                                {m ? displayNameOf(m) : e.memberId}
+                              </Text>
+                            </div>
+
+                            {/* Dirty */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text b css={{mb: 0, color: 'var(--reblas-btn4-color)'}}>{formatCentsWhole(e.dirtyCents)}</Text>
+                            </div>
+
+                            {/* Clean */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text b css={{mb: 0, color: 'var(--reblas-btn2-color)'}}>{formatCentsWhole(e.cleanCents)}</Text>
+                            </div>
+
+                            {/* Rate */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text b css={{mb: 0, color: 'var(--reblas-btn1-color)'}}>{e.washRatePct}%</Text>
+                            </div>
+
+                            {/* Status */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text
+                                b
+                                css={{
+                                  mb: 0,
+                                  color:
+                                    e.status === 'paid'
+                                      ? 'var(--reblas-btn2-color)'
+                                      : e.status === 'pending'
+                                      ? 'var(--reblas-btn4-color)'
+                                      : 'var(--reblas-btn3-color)',
+                                }}
+                              >
+                                {e.status === 'paid' ? (<span style={{display:'inline-flex', alignItems:'center', gap:8}}><GiPayMoney size={18} /> PAID</span>) : e.status === 'pending' ? (<span style={{display:'inline-flex', alignItems:'center', gap:8}}><MdOutlinePendingActions size={18} /> PENDING</span>) : (<span style={{display:'inline-flex', alignItems:'center', gap:8}}><GiReceiveMoney size={18} /> COLLECTED</span>)}
+                              </Text>
+                            </div>
+
+                            {/* Buttons */}
+                            <div
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'flex-end',
+                                gap: 8,
+                                alignItems: 'center',
+                                borderLeft: '1px solid rgba(255,255,255,0.08)',
+                                padding: '0 12px',
+                              }}
+                            >
+                              <Button
+                                auto
+                                className="reblas-btn-1"
+                                aria-label="Edit"
+                                title="Edit"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'collected'}
+                                onPress={() => openEdit(e)}
+                              >
+                                <FaEdit size={20} />
+                              </Button>
+
+                              <Button
+                                auto
+                                className="reblas-btn-3"
+                                aria-label="Delete"
+                                title="Delete"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'collected'}
+                                onPress={() => openConfirmDelete(e)}
+                              >
+                                <MdDelete size={20} />
+                              </Button>
+
+                              <Button
+                                auto
+                                className="reblas-btn-4"
+                                aria-label="Mark Pending"
+                                title="Mark Pending"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'collected'}
+                                onPress={() => openConfirmPending(e)}
+                              >
+                                <MdOutlinePendingActions size={20} />
+                              </Button>
+
+                              <Button
+                                auto
+                                className="reblas-btn-2"
+                                aria-label="Mark Paid"
+                                title="Mark Paid"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'pending'}
+                                onPress={() => { const id = String(e?.id || '').trim(); if (!id) return; setEntryStatus(id, 'paid'); }}
+                              >
+                                <MdPaid size={20} />
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+
+      </Card>
+
+      {/* Member history modal */}
+      <Modal closeButton blur aria-label="Member totals" open={memberOpen} onClose={() => setMemberOpen(false)} width="980px">
+        <Modal.Header>
+          <Text b>Member wash history</Text>
+        </Modal.Header>
+
+        <Modal.Body>
+          {memberErr ? (
+            <div style={{padding: 12, borderRadius: 12, border: '1px solid var(--reblas-outline)', background: 'rgba(120,0,0,0.20)'}}>
+              <Text b css={{mb: 0}}>Error</Text>
+              <Text size="$sm" css={{opacity: 0.9, mb: 0}}>{memberErr}</Text>
+            </div>
+          ) : null}
+
+          {memberLoading ? (
+            <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+          ) : memberHistory ? (
+            <>
+              {(() => {
+                const m = memberMap.get(String(memberHistory.memberId));
+                return (
+                  <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                    <Avatar src={m?.avatarUrl || undefined} size="md" css={{boxShadow: '0 0 0 1px var(--reblas-outline)'}} />
+                    <div style={{display: 'flex', flexDirection: 'column', lineHeight: 1.15}}>
+                      <Text b css={{mb: 0}}>{m ? displayNameOf(m) : memberHistory.memberId}</Text>
+                      <Text size="$sm" css={{opacity: 0.75, mb: 0}}>
+                        Total Dirty: {formatCentsWhole(memberHistory.totals.dirtyCents)} • Total Clean: {formatCentsWhole(memberHistory.totals.cleanCents)} • Entries: {memberHistory.totals.entryCount}
+                      </Text>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <Spacer y={0.6} />
+
+              <Card css={{p: 0, overflow: 'hidden', background: 'rgba(0,0,0,0.10)', border: '1px solid var(--reblas-outline)'}}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '140px 160px 160px 120px 120px 1fr',
+                    padding: '10px 14px',
+                    borderBottom: '1px solid rgba(255,255,255,0.08)',
+                    background: 'rgba(255,255,255,0.02)',
+                  }}
+                >
+                  <Text b size="$sm" css={{mb: 0}}>Week</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Dirty</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Clean</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Rate</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Status</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Created</Text>
+                </div>
+
+                <div style={{maxHeight: 520, overflowY: 'auto'}} className="reblas-scrollhide">
+                  {memberHistory.entries.map((e, idx) => {
+                    const bg = idx % 2 === 1 ? 'rgba(255,255,255,0.03)' : 'transparent';
+                    return (
+                      <div
+                        key={e.id}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '140px 160px 160px 120px 120px 1fr',
+                          padding: '12px 14px',
+                          borderBottom: '1px solid rgba(255,255,255,0.06)',
+                          background: bg,
+                          alignItems: 'center',
+                        }}
+                      >
+                        <Text css={{mb: 0}}>{e.weekEnding}</Text>
+                        <Text css={{mb: 0}}>{formatCentsWhole(e.dirtyCents)}</Text>
+                        <Text css={{mb: 0}}>{formatCentsWhole(e.cleanCents)}</Text>
+                        <Text css={{mb: 0}}>{e.washRatePct}%</Text>
+                        <Text css={{mb: 0, color: e.status === 'paid' ? '$green600' : '$warning'}}>
+                          {e.status === 'paid' ? 'PAID' : 'PENDING'}
+                        </Text>
+                        <Text css={{mb: 0, opacity: 0.8}}>{e.createdAt ? new Date(e.createdAt).toLocaleString() : ''}</Text>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+            </>
+          ) : (
+            <Text size="$sm" css={{opacity: 0.7}}>Select a member to view history.</Text>
+          )}
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button auto flat onPress={() => setMemberOpen(false)}>
+            Close
+          </Button>
+        </Modal.Footer>
+      </Modal>
+            
+      {/* Confirm pending modal */}
+      <Modal
+        closeButton
+        blur
+        aria-label="Confirm pending"
+        open={confirmPendingOpen}
+        onClose={() => setConfirmPendingOpen(false)}
+        width="560px"
+        css={{
+          background: 'rgba(0,0,0,0.22)',
+          border: '1px solid var(--reblas-outline)',
+          backdropFilter: 'blur(14px)',
+          borderRadius: 14,
+        }}
+      >
+        <Modal.Header>
+          <Text b css={{mb: 0}}>Mark Pending</Text>
+        </Modal.Header>
+
+        <Modal.Body>
+          <Text size="$sm" css={{opacity: 0.9, mb: 0}}>
+            Marking this as pending means the dirty has been handed over, This will lock the transaction from edits.
+          </Text>
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button className="reblas-btn-1" auto onPress={() => setConfirmPendingOpen(false)}>
+            Cancel
+          </Button>
+          <Button className="reblas-btn-4" auto onPress={confirmMarkPending}>
+            Confirm
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+
+      {/* Confirm delete modal */}
+      <Modal
+        closeButton
+        blur
+        aria-label="Confirm delete"
+        open={confirmDeleteOpen}
+        onClose={() => setConfirmDeleteOpen(false)}
+        width="560px"
+        css={{
+          background: 'rgba(0,0,0,0.22)',
+          border: '1px solid var(--reblas-outline)',
+          backdropFilter: 'blur(14px)',
+          borderRadius: 14,
+        }}
+      >
+        <Modal.Header>
+          <Text b css={{mb: 0}}>Delete transaction</Text>
+        </Modal.Header>
+
+        <Modal.Body>
+          <Text size="$sm" css={{opacity: 0.9, mb: 0}}>
+            This will permanently delete this wash transaction from all pages.
+          </Text>
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button className="reblas-btn-1" auto onPress={() => setConfirmDeleteOpen(false)}>
+            Cancel
+          </Button>
+          <Button className="reblas-btn-3" auto onPress={confirmDelete}>
+            Delete
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+{/* Add wash modal */}
+      <Modal
+        closeButton
+        blur
+        aria-label="Add wash"
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        width="720px"
+        css={{
+          background: 'rgba(0,0,0,0.22)',
+          border: '1px solid var(--reblas-outline)',
+          backdropFilter: 'blur(14px)',
+          borderRadius: 14,
+        }}
+      >
+        <Modal.Header>
+          <div style={{display: 'flex', flexDirection: 'column', gap: 4, width: '100%'}}>
+            <Text b css={{mb: 0}}>{isEditing ? 'Edit wash' : 'Add wash'}</Text>
+            <Text size="$xs" css={{opacity: 0.75, mb: 0}}>
+              Dirty × (100% − Wash Rate) = Clean
+            </Text>
+          </div>
+        </Modal.Header>
+
+        <Modal.Body>
+          {formErr ? (
+            <div
+              style={{
+                padding: 12,
+                borderRadius: 14,
+                border: '1px solid var(--reblas-outline)',
+                background: 'rgba(120,0,0,0.20)',
+              }}
+            >
+              <Text b css={{mb: 0}}>Error</Text>
+              <Text size="$sm" css={{opacity: 0.9, mb: 0}}>{formErr}</Text>
+            </div>
+          ) : null}
+
+          <Card
+            css={{
+              p: '$8',
+              background: 'rgba(0,0,0,0.26)',
+              border: '1px solid var(--reblas-outline)',
+              borderRadius: 14,
+            }}
+          >
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 180px', gap: 12}}>
+              <div>
+                <Text size="$xs" css={{opacity: 0.75, mb: 6, letterSpacing: '0.06em', textTransform: 'uppercase'}}>
+                  Member
+                </Text>
+                <select
+                  aria-label="Select member"
+                  className="reblas-select"
+                  value={formMemberId}
+                  onChange={(e) => setFormMemberId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    height: 44,
+                    borderRadius: 14,
+                    background: 'rgba(0,0,0,0.28)',
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    color: 'white',
+                    padding: '0 12px',
+                    outline: 'none',
+                  }}
+                >
+                  <option value="">Select a member…</option>
+                  {filteredMembersForWash.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {displayNameOf(m)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <Input
+                aria-label="Wash rate percent"
+                label="Wash Rate %"
+                type="number"
+                min={0}
+                max={100}
+                bordered
+                fullWidth
+                value={String(formWashRate)}
+                onChange={(e) => setFormWashRate(Number(e.target.value))}
+                css={{
+                  '& .nextui-input-wrapper': {
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    boxShadow: 'none',
+                  },
+                }}
+              />
+            </div>
+          </Card>
+
+          <Card
+            css={{
+              p: '$8',
+              background: 'rgba(0,0,0,0.26)',
+              border: '1px solid var(--reblas-outline)',
+              borderRadius: 14,
+            }}
+          >
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12}}>
+              <Input
+                aria-label="Dirty amount"
+                label="Dirty amount"
+                placeholder="e.g. 1000"
+                bordered
+                fullWidth
+                value={formDirty}
+                onChange={(e) => setFormDirty(String(e?.target?.value || '').replace(/[^0-9]/g, ''))}
+                css={{
+                  '& .nextui-input-wrapper': {
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    boxShadow: 'none',
+                  },
+                }}
+              />
+
+              <Input
+                aria-label="Clean amount"
+                label="Clean amount"
+                readOnly
+                bordered
+                fullWidth
+                value={formatCentsWhole(cleanCents)}
+                css={{
+                  '& .nextui-input-wrapper': {
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    boxShadow: 'none',
+                  },
+                }}
+              />
+            </div>
+
+            <Spacer y={0.3} />
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '10px 12px',
+                borderRadius: 14,
+                border: '1px solid var(--reblas-outline)',
+                background: 'rgba(0,0,0,0.22)',
+              }}
+            >
+              <Text size="$xs" css={{opacity: 0.75, mb: 0}}>
+                Preview
+              </Text>
+              <Text size="$xs" css={{opacity: 0.85, mb: 0}}>
+                Dirty: <b>{formatCentsWhole(dirtyCents)}</b> • Clean: <b>{formatCentsWhole(cleanCents)}</b> • Rate:{' '}
+                <b>{Math.max(0, Math.min(100, Math.floor(Number(formWashRate || 0))))}%</b>
+              </Text>
+            </div>
+          </Card>
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button className="reblas-btn-1" auto onPress={() => setAddOpen(false)} disabled={saving}>
+            Cancel
+          </Button>
+          <Button className="reblas-btn-2" auto onPress={saveUpsert} disabled={saving}>
+            {saving ? 'Saving…' : 'Add'}
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+    </div>
+  );
+};
+  const fetchMembers = async () => {
+    setMembersErr('');
+    try {
+      const res = await fetch('/api/members/list');
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load members (${res.status})`);
+      setMembersPayload(j as MembersPayload);
+    } catch (e: any) {
+      setMembersErr(e?.message || 'Failed to load members');
+      setMembersPayload({});
+    }
+  };
+
+  const fetchWeek = async (targetWeekEnding: string) => {
+    setWeekErr('');
+    setWeekLoading(true);
+    try {
+      const qs = targetWeekEnding ? `?weekEnding=${encodeURIComponent(targetWeekEnding)}` : '';
+      const res = await fetch(`/api/wash/week${qs}`);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load week (${res.status})`);
+      setWeekData(j as WeekPayload);
+    } catch (e: any) {
+      setWeekErr(e?.message || 'Failed to load wash week');
+      setWeekData(null);
+    } finally {
+      setWeekLoading(false);
+    }
+  };
+
+  const fetchAllTotals = async () => {
+    setTotalsErr('');
+    setTotalsLoading(true);
+    try {
+      const res = await fetch('/api/wash/totals'); // all-time totals across all weeks
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load totals (${res.status})`);
+      setAllTotals(j as WashTotalsPayload);
+    } catch (e: any) {
+      setTotalsErr(e?.message || 'Failed to load totals');
+      setAllTotals(null);
+    } finally {
+      setTotalsLoading(false);
+    }
+  };
+
+  const reloadMemberHistory = async (memberId: string) => {
+    if (!memberId) return;
+    setMemberErr('');
+    setMemberLoading(true);
+    try {
+      const res = await fetch(`/api/wash/member?memberId=${encodeURIComponent(memberId)}`);
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to load member history (${res.status})`);
+      setMemberHistory(j as MemberHistoryPayload);
+    } catch (e: any) {
+      setMemberErr(e?.message || 'Failed to load member history');
+      setMemberHistory(null);
+    } finally {
+      setMemberLoading(false);
+    }
+  };
+
+  const openMember = async (memberId: string) => {
+    setMemberHistory(null);
+    setMemberOpen(true);
+    setMemberSelectedId(memberId);
+    await reloadMemberHistory(memberId);
+  };
+
+  useEffect(() => {
+    void fetchMembers();
+    void fetchMemberSettings();
+  }, []);
+
+  useEffect(() => {
+    // keep week data fresh (used when user switches to week view)
+    void fetchWeek(weekEnding);
+  }, [weekEnding]);
+
+  useEffect(() => {
+    if (view === 'totals') void fetchAllTotals();
+  }, [view]);
+
+  const onPrevWeek = () => {
+    if (view !== 'week') return;
+    const next = addDaysYMD(effectiveWeekEnding, -7);
+    setWeekEnding(next === currentWeekEnding ? '' : next);
+  };
+
+  const onNextWeek = () => {
+    if (view !== 'week') return;
+    const next = addDaysYMD(effectiveWeekEnding, 7);
+    setWeekEnding(next === currentWeekEnding ? '' : next);
+  };
+
+  const openAdd = () => {
+    setFormErr('');
+      setIsEditing(false);
+      setEditEntryId('');
+    setFormDirty('');
+    setFormMemberId('');
+    setFormWashRate(Number(weekData?.suggestedWashRatePct ?? 25));
+    setAddOpen(true);
+  };
+
+const openEdit = (entry: any) => {
+      if (!entry) return;
+      if (String(entry?.status || '') !== 'collected') return; // UI already disables, extra guard
+      setFormErr('');
+      setIsEditing(true);
+      setEditEntryId(String(entry?.id || '').trim());
+      setFormMemberId(String(entry?.memberId || '').trim());
+      setFormWashRate(Number(entry?.washRatePct ?? 25));
+      // dirty is stored as cents; convert to dollars string for the input
+      const dirtyCents = Number(entry?.dirtyCents || 0) || 0;
+      setFormDirty(String(Math.round(dirtyCents / 100)));
+      setAddOpen(true);
+    };
+
+  const dirtyCents = Math.round((parseMoneyToCents(formDirty) || 0) / 100) * 100;
+  const cleanCents = Math.round((calcCleanCents(dirtyCents, Number(formWashRate || 0)) || 0) / 100) * 100;
+
+  const saveUpsert = async () => {
+      setFormErr('');
+      if (!formMemberId) return setFormErr('Pick a member.');
+      if (dirtyCents <= 0) return setFormErr('Dirty amount must be > 0.');
+      const rate = Math.max(0, Math.min(100, Math.floor(Number(formWashRate || 0))));
+
+      setSaving(true);
+      try {
+        const qs = `?weekEnding=${encodeURIComponent(effectiveWeekEnding)}`;
+
+        if (isEditing) {
+          const id = String(editEntryId || '').trim();
+          if (!id) throw new Error('Missing entryId for edit');
+
+          const res = await fetch(`/api/wash/week${qs}`, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              entryId: id,
+              action: 'edit',
+              washRatePct: rate,
+              dirtyAmount: formDirty,
+            }),
+          });
+
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(j?.error || `Failed to edit wash (${res.status})`);
+        } else {
+          const res = await fetch(`/api/wash/week${qs}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              memberId: formMemberId,
+              washRatePct: rate,
+              dirtyAmount: formDirty,
+            }),
+          });
+
+          const j = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(j?.error || `Failed to add wash (${res.status})`);
+        }
+
+        setAddOpen(false);
+        setIsEditing(false);
+        setEditEntryId('');
+        await fetchWeek(weekEnding);
+        await fetchAllTotals();
+        if (memberOpen && memberSelectedId) await reloadMemberHistory(memberSelectedId);
+      } catch (e: any) {
+        setFormErr(e?.message || (isEditing ? 'Failed to edit wash' : 'Failed to add wash'));
+      } finally {
+        setSaving(false);
+      }
+    };
+
+  
+  const setEntryStatus = async (entryId: string, status: 'pending' | 'paid') => {
+    try {
+      const qs = `?weekEnding=${encodeURIComponent(effectiveWeekEnding)}`;
+      const res = await fetch(`/api/wash/week${qs}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({entryId, status}),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to update status (${res.status})`);
+
+      await fetchWeek(weekEnding);
+      await fetchAllTotals();
+    if (memberOpen && memberSelectedId) await reloadMemberHistory(memberSelectedId);
+    } catch (e: any) {
+      setWeekErr(e?.message || 'Failed to update status');
+    }
+  };
+
+  const deleteEntry = async (entryId: string) => {
+    if (!entryId) return;
+    try {
+      const qs = `?weekEnding=${encodeURIComponent(effectiveWeekEnding)}`;
+      const res = await fetch(`/api/wash/week${qs}`, {
+        method: 'PATCH',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({entryId, action: 'delete'}),
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(j?.error || `Failed to delete (${res.status})`);
+
+      await fetchWeek(weekEnding);
+      await fetchAllTotals();
+    if (memberOpen && memberSelectedId) await reloadMemberHistory(memberSelectedId);
+    } catch (e: any) {
+      setWeekErr(e?.message || 'Failed to delete');
+    }
+  };
+
+
+  const openConfirmPending = (entry: any) => {
+    if (!entry) return;
+    setConfirmPendingEntryId(String(entry.id || ''));
+    setConfirmPendingOpen(true);
+  };
+
+  const confirmMarkPending = async () => {
+    const id = String(confirmPendingEntryId || '').trim();
+    setConfirmPendingOpen(false);
+    if (!id) return;
+    await setEntryStatus(id, 'pending');
+  };
+
+  const openConfirmDelete = (entry: any) => {
+    if (!entry) return;
+    setConfirmDeleteEntryId(String(entry.id || ''));
+    setConfirmDeleteOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    const id = String(confirmDeleteEntryId || '').trim();
+    setConfirmDeleteOpen(false);
+    if (!id) return;
+    await deleteEntry(id);
+  };
+
+
+
+  const colCard: React.CSSProperties = {
+    border: '1px solid var(--reblas-outline)',
+    borderRadius: 14,
+    overflow: 'hidden',
+    background: 'rgba(0,0,0,0.10)',
+  };
+
+  const headerCell: React.CSSProperties = {
+    padding: '12px 14px 10px',
+    borderBottom: '1px solid rgba(255,255,255,0.08)',
+    background: 'rgba(255,255,255,0.03)',
+  };
+
+  const rowH = 62;
+  const rowBase: React.CSSProperties = {
+    height: rowH,
+    padding: '6px 12px',
+    display: 'flex',
+    alignItems: 'center',
+    borderBottom: '1px solid rgba(255,255,255,0.06)',
+  };
+
+  const stripeBg = 'rgba(255,255,255,0.03)';
+  const clearBg = 'transparent';
+
+  const entries = weekData?.entries || [];
+  const weekTotals = weekData?.totals || {dirtyCents: 0, cleanCents: 0};
+
+  return (
+    <div style={{padding: 22}}>
+      <Card css={glassCardCss}>
+        {/* Title ABOVE everything */}
+        <Text h3 css={{mb: 0}}>Wash Tracker</Text>
+        <Spacer y={0.5} />
+
+        {/* Controls row (swapped): arrows + date text, then Totals/Week */}
+          <div style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 14, flexWrap: 'wrap'}}>
+            {/* Left: view buttons ALWAYS at far-left, then either week nav or totals label */}
+            <div style={{display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap'}}>
+              <Button
+                auto
+                className={view === 'week' ? 'reblas-btn-2' : 'reblas-btn-1'}
+                onPress={() => setView('week')}
+              >
+                Week
+              </Button>
+
+              <Button
+                auto
+                className={view === 'totals' ? 'reblas-btn-2' : 'reblas-btn-1'}
+                onPress={() => setView('totals')}
+              >
+                Totals
+              </Button>
+
+              {view === 'week' ? (
+                <>
+                  <Button auto className="reblas-btn-1" onPress={onPrevWeek} aria-label="Previous week">
+                    ◀
+                  </Button>
+
+                  <Text size="$sm" css={{opacity: 0.85, mb: 0}}>
+                    {effectiveLabel} • Week ending {effectiveWeekEnding}
+                  </Text>
+
+                  <Button auto className="reblas-btn-1" onPress={onNextWeek} aria-label="Next week">
+                    ▶
+                  </Button>
+                </>
+              ) : (
+                <Text size="$sm" css={{opacity: 0.85, mb: 0}}>
+                  All-time totals (members who have ever been added)
+                </Text>
+              )}
+            </div>
+
+            {/* Right: Week-only totals + Add wash */}
+            {view === 'week' ? (
+              <div style={{display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap'}}>
+                <div style={{display: 'flex', gap: 12, alignItems: 'baseline'}}>
+                  <div style={{textAlign: 'right', paddingRight: 12, marginRight: 12, borderRight: '1px solid rgba(255,255,255,0.10)'}}>
+                  <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Week total dirty</Text>
+                    <Text b css={{mb: 0, color: 'var(--reblas-btn4-color)', whiteSpace: 'nowrap'}}>{formatCentsWhole(weekTotals.dirtyCents)}</Text>
+                  </div>
+                  <div style={{textAlign: 'right'}}>
+                  <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Week total clean</Text>
+                    <Text b css={{mb: 0, color: 'var(--reblas-btn2-color)', whiteSpace: 'nowrap'}}>{formatCentsWhole(weekTotals.cleanCents)}</Text>
+                  </div>
+                </div>
+
+                <Button className="reblas-btn-4" auto onPress={openAdd}>
+                  Add wash
+                </Button>
+              </div>
+            ) : null}
+          </div>
+
+
+
+        <Spacer y={0.8} />
+
+        {membersErr ? <Text size="$sm" css={{opacity: 0.8}}>Members load error: {membersErr}</Text> : null}
+
+        {/* TOTALS VIEW (default) */}
+        {view === 'totals' ? (
+          <>
+            {totalsErr ? (
+              <Card css={{p: '$8', mb: '$8', background: 'rgba(120,0,0,0.25)', border: '1px solid var(--reblas-outline)'}}>
+                <Text b>Error</Text>
+                <Text size="$sm" css={{opacity: 0.9}}>{totalsErr}</Text>
+              </Card>
+            ) : null}
+            <div style={{overflowX: 'auto'}}>
+              <div
+                style={{
+                  minWidth: 820,
+                  display: 'grid',
+                  gridTemplateColumns: '320px 1fr',
+                  gap: 12,
+                  alignItems: 'start',
+                }}
+              >
+                {/* MEMBERS COLUMN */}
+                <div style={colCard}>
+                  <div style={headerCell}>
+                    <Text b css={{mb: 0}}>Members</Text>
+                  </div>
+
+                  {totalsLoading ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+                    </div>
+                  ) : !allTotals || !Array.isArray(allTotals.members) || allTotals.members.length === 0 ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>No wash entries yet.</Text>
+                    </div>
+                  ) : (
+                    allTotals.members.map((r, idx) => {
+                      const m = memberMap.get(String(r.memberId));
+                      const bg = idx % 2 === 1 ? stripeBg : clearBg;
+                      const rank = m ? rankNameFor(m, roleMap) : '';
+
+                      return (
+                        <div
+                          key={r.memberId}
+                          onClick={() => openMember(String(r.memberId))}
+                          style={{...rowBase, background: bg, gap: 12, cursor: 'pointer'}}
+                        >
+                          <Avatar
+                            src={m?.avatarUrl || undefined}
+                            size="md"
+                            css={{boxShadow: '0 0 0 1px var(--reblas-outline)'}}
+                          />
+                          <div style={{display: 'flex', flexDirection: 'column', lineHeight: 1.15, minWidth: 0}}>
+                            <Text b css={{mb: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>
+                              {m ? displayNameOf(m) : r.memberId}
+                            </Text>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {/* TOTALS / NUMBERS COLUMN */}
+                <div style={colCard}>
+                  <div style={headerCell}>
+                    <Text b css={{mb: 0}}>Totals</Text>
+                  </div>
+
+                  {totalsLoading ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+                    </div>
+                  ) : !allTotals || !Array.isArray(allTotals.members) || allTotals.members.length === 0 ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>—</Text>
+                    </div>
+                  ) : (
+                    allTotals.members.map((r, idx) => {
+                      const bg = idx % 2 === 1 ? stripeBg : clearBg;
+
+                      return (
+                        <div
+                          key={'totals_' + r.memberId}
+                          onClick={() => openMember(String(r.memberId))}
+                          style={{...rowBase, background: bg, cursor: 'pointer'}}
+                        >
+                          <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr 90px 140px', gap: 12, width: '100%'}}>
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: '0 12px',
+                                height: '100%', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Total Dirty</Text>
+                              <Text b css={{mb: 0}}>{formatCentsWhole(r.dirtyCents)}</Text>
+                            </div>
+
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Total Clean</Text>
+                              <Text b css={{mb: 0}}>{formatCentsWhole(r.cleanCents)}</Text>
+                            </div>
+
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'center', textAlign: 'center', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Entries</Text>
+                              <Text b css={{mb: 0}}>{r.entryCount}</Text>
+                            </div>
+
+                            <div style={{display: 'flex', flexDirection: 'column', alignItems: 'flex-end'}}>
+                              <Text size="$xs" css={{opacity: 0.7, mb: 0}}>Last Week</Text>
+                              <Text b css={{mb: 0}}>{r.lastWeekEnding}</Text>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+        {/* WEEK VIEW */}
+        {view === 'week' ? (
+          <>
+            {weekErr ? (
+              <Card css={{p: '$8', mb: '$8', background: 'rgba(120,0,0,0.25)', border: '1px solid var(--reblas-outline)'}}>
+                <Text b>Error</Text>
+                <Text size="$sm" css={{opacity: 0.9}}>{weekErr}</Text>
+              </Card>
+            ) : null}
+
+            <div style={{overflowX: 'auto'}}>
+              <div style={{minWidth: 980}}>
+                <div style={colCard}>
+                  {/* ONE combined header */}
+                  <div style={{...headerCell, padding: '10px 0'}}>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '320px 1fr 1fr 1fr 1fr 190px',
+                        gap: 0,
+                        alignItems: 'stretch',
+                      }}
+                    >
+                      <div style={{display: 'flex', alignItems: 'center', height: '100%', padding: '0 14px', gap: 12}}>
+  <div style={{width: 28, height: 28}} />
+  <Text b css={{mb: 0}}>Members</Text>
+</div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Dirty Collected
+                        </Text>
+                      </div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Clean Returned
+                        </Text>
+                      </div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Rate
+                        </Text>
+                      </div>
+
+                      <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                        <Text size="$xs" css={{mb: 0, opacity: 0.75, letterSpacing: '0.10em', textTransform: 'uppercase'}}>
+                          Status
+                        </Text>
+                      </div>
+
+                      <div style={{borderLeft: '1px solid rgba(255,255,255,0.08)', height: '100%'}} />
+                    </div>
+                  </div>
+
+                  {/* ONE combined body */}
+                  {weekLoading ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+                    </div>
+                  ) : entries.length === 0 ? (
+                    <div style={{padding: 14}}>
+                      <Text size="$sm" css={{opacity: 0.7}}>No entries for this week.</Text>
+                    </div>
+                  ) : (
+                    entries.map((e, idx) => {
+                      const m = memberMap.get(String(e.memberId));
+                      const bg = idx % 2 === 1 ? stripeBg : clearBg;
+
+                      return (
+                        <div key={e.id} style={{...rowBase, padding: 0, background: bg}}>
+                          <div
+                            style={{
+                              display: 'grid',
+                              gridTemplateColumns: '320px 1fr 1fr 1fr 1fr 190px',
+                              gap: 0,
+                              width: '100%',
+                              alignItems: 'stretch',
+                            }}
+                          >
+                            {/* Member cell */}
+                            <div style={{display: 'flex', alignItems: 'center', gap: 12, padding: '0 14px', minWidth: 0}}>
+                              <Avatar
+                                src={m?.avatarUrl || undefined}
+                                size="xs"
+                                css={{boxShadow: '0 0 0 1px var(--reblas-outline)'}}
+                              />
+                              <Text b css={{mb: 0, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis'}}>
+                                {m ? displayNameOf(m) : e.memberId}
+                              </Text>
+                            </div>
+
+                            {/* Dirty */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text b css={{mb: 0, color: 'var(--reblas-btn4-color)'}}>{formatCentsWhole(e.dirtyCents)}</Text>
+                            </div>
+
+                            {/* Clean */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text b css={{mb: 0, color: 'var(--reblas-btn2-color)'}}>{formatCentsWhole(e.cleanCents)}</Text>
+                            </div>
+
+                            {/* Rate */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text b css={{mb: 0, color: 'var(--reblas-btn1-color)'}}>{e.washRatePct}%</Text>
+                            </div>
+
+                            {/* Status */}
+                            <div style={{display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', padding: '0 12px', borderLeft: '1px solid rgba(255,255,255,0.08)'}}>
+                              <Text
+                                b
+                                css={{
+                                  mb: 0,
+                                  color:
+                                    e.status === 'paid'
+                                      ? 'var(--reblas-btn2-color)'
+                                      : e.status === 'pending'
+                                      ? 'var(--reblas-btn4-color)'
+                                      : 'var(--reblas-btn3-color)',
+                                }}
+                              >
+                                {e.status === 'paid' ? (<span style={{display:'inline-flex', alignItems:'center', gap:8}}><GiPayMoney size={18} /> PAID</span>) : e.status === 'pending' ? (<span style={{display:'inline-flex', alignItems:'center', gap:8}}><MdOutlinePendingActions size={18} /> PENDING</span>) : (<span style={{display:'inline-flex', alignItems:'center', gap:8}}><GiReceiveMoney size={18} /> COLLECTED</span>)}
+                              </Text>
+                            </div>
+
+                            {/* Buttons */}
+                            <div
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'flex-end',
+                                gap: 8,
+                                alignItems: 'center',
+                                borderLeft: '1px solid rgba(255,255,255,0.08)',
+                                padding: '0 12px',
+                              }}
+                            >
+                              <Button
+                                auto
+                                className="reblas-btn-1"
+                                aria-label="Edit"
+                                title="Edit"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'collected'}
+                                onPress={() => openEdit(e)}
+                              >
+                                <FaEdit size={20} />
+                              </Button>
+
+                              <Button
+                                auto
+                                className="reblas-btn-3"
+                                aria-label="Delete"
+                                title="Delete"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'collected'}
+                                onPress={() => openConfirmDelete(e)}
+                              >
+                                <MdDelete size={20} />
+                              </Button>
+
+                              <Button
+                                auto
+                                className="reblas-btn-4"
+                                aria-label="Mark Pending"
+                                title="Mark Pending"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'collected'}
+                                onPress={() => openConfirmPending(e)}
+                              >
+                                <MdOutlinePendingActions size={20} />
+                              </Button>
+
+                              <Button
+                                auto
+                                className="reblas-btn-2"
+                                aria-label="Mark Paid"
+                                title="Mark Paid"
+                                css={{minWidth: 36, width: 36, padding: 0}}
+                                disabled={e.status !== 'pending'}
+                                onPress={() => { const id = String(e?.id || '').trim(); if (!id) return; setEntryStatus(id, 'paid'); }}
+                              >
+                                <MdPaid size={20} />
+                              </Button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+
+      </Card>
+
+      {/* Member history modal */}
+      <Modal closeButton blur aria-label="Member totals" open={memberOpen} onClose={() => setMemberOpen(false)} width="980px">
+        <Modal.Header>
+          <Text b>Member wash history</Text>
+        </Modal.Header>
+
+        <Modal.Body>
+          {memberErr ? (
+            <div style={{padding: 12, borderRadius: 12, border: '1px solid var(--reblas-outline)', background: 'rgba(120,0,0,0.20)'}}>
+              <Text b css={{mb: 0}}>Error</Text>
+              <Text size="$sm" css={{opacity: 0.9, mb: 0}}>{memberErr}</Text>
+            </div>
+          ) : null}
+
+          {memberLoading ? (
+            <Text size="$sm" css={{opacity: 0.7}}>Loading…</Text>
+          ) : memberHistory ? (
+            <>
+              {(() => {
+                const m = memberMap.get(String(memberHistory.memberId));
+                return (
+                  <div style={{display: 'flex', alignItems: 'center', gap: 12}}>
+                    <Avatar src={m?.avatarUrl || undefined} size="md" css={{boxShadow: '0 0 0 1px var(--reblas-outline)'}} />
+                    <div style={{display: 'flex', flexDirection: 'column', lineHeight: 1.15}}>
+                      <Text b css={{mb: 0}}>{m ? displayNameOf(m) : memberHistory.memberId}</Text>
+                      <Text size="$sm" css={{opacity: 0.75, mb: 0}}>
+                        Total Dirty: {formatCentsWhole(memberHistory.totals.dirtyCents)} • Total Clean: {formatCentsWhole(memberHistory.totals.cleanCents)} • Entries: {memberHistory.totals.entryCount}
+                      </Text>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              <Spacer y={0.6} />
+
+              <Card css={{p: 0, overflow: 'hidden', background: 'rgba(0,0,0,0.10)', border: '1px solid var(--reblas-outline)'}}>
+                <div
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '140px 160px 160px 120px 120px 1fr',
+                    padding: '10px 14px',
+                    borderBottom: '1px solid rgba(255,255,255,0.08)',
+                    background: 'rgba(255,255,255,0.02)',
+                  }}
+                >
+                  <Text b size="$sm" css={{mb: 0}}>Week</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Dirty</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Clean</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Rate</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Status</Text>
+                  <Text b size="$sm" css={{mb: 0}}>Created</Text>
+                </div>
+
+                <div style={{maxHeight: 520, overflowY: 'auto'}} className="reblas-scrollhide">
+                  {memberHistory.entries.map((e, idx) => {
+                    const bg = idx % 2 === 1 ? 'rgba(255,255,255,0.03)' : 'transparent';
+                    return (
+                      <div
+                        key={e.id}
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: '140px 160px 160px 120px 120px 1fr',
+                          padding: '12px 14px',
+                          borderBottom: '1px solid rgba(255,255,255,0.06)',
+                          background: bg,
+                          alignItems: 'center',
+                        }}
+                      >
+                        <Text css={{mb: 0}}>{e.weekEnding}</Text>
+                        <Text css={{mb: 0}}>{formatCentsWhole(e.dirtyCents)}</Text>
+                        <Text css={{mb: 0}}>{formatCentsWhole(e.cleanCents)}</Text>
+                        <Text css={{mb: 0}}>{e.washRatePct}%</Text>
+                        <Text css={{mb: 0, color: e.status === 'paid' ? '$green600' : '$warning'}}>
+                          {e.status === 'paid' ? 'PAID' : 'PENDING'}
+                        </Text>
+                        <Text css={{mb: 0, opacity: 0.8}}>{e.createdAt ? new Date(e.createdAt).toLocaleString() : ''}</Text>
+                      </div>
+                    );
+                  })}
+                </div>
+              </Card>
+            </>
+          ) : (
+            <Text size="$sm" css={{opacity: 0.7}}>Select a member to view history.</Text>
+          )}
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button auto flat onPress={() => setMemberOpen(false)}>
+            Close
+          </Button>
+        </Modal.Footer>
+      </Modal>
+            
+      {/* Confirm pending modal */}
+      <Modal
+        closeButton
+        blur
+        aria-label="Confirm pending"
+        open={confirmPendingOpen}
+        onClose={() => setConfirmPendingOpen(false)}
+        width="560px"
+        css={{
+          background: 'rgba(0,0,0,0.22)',
+          border: '1px solid var(--reblas-outline)',
+          backdropFilter: 'blur(14px)',
+          borderRadius: 14,
+        }}
+      >
+        <Modal.Header>
+          <Text b css={{mb: 0}}>Mark Pending</Text>
+        </Modal.Header>
+
+        <Modal.Body>
+          <Text size="$sm" css={{opacity: 0.9, mb: 0}}>
+            Marking this as pending means the dirty has been handed over, This will lock the transaction from edits.
+          </Text>
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button className="reblas-btn-1" auto onPress={() => setConfirmPendingOpen(false)}>
+            Cancel
+          </Button>
+          <Button className="reblas-btn-4" auto onPress={confirmMarkPending}>
+            Confirm
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+
+      {/* Confirm delete modal */}
+      <Modal
+        closeButton
+        blur
+        aria-label="Confirm delete"
+        open={confirmDeleteOpen}
+        onClose={() => setConfirmDeleteOpen(false)}
+        width="560px"
+        css={{
+          background: 'rgba(0,0,0,0.22)',
+          border: '1px solid var(--reblas-outline)',
+          backdropFilter: 'blur(14px)',
+          borderRadius: 14,
+        }}
+      >
+        <Modal.Header>
+          <Text b css={{mb: 0}}>Delete transaction</Text>
+        </Modal.Header>
+
+        <Modal.Body>
+          <Text size="$sm" css={{opacity: 0.9, mb: 0}}>
+            This will permanently delete this wash transaction from all pages.
+          </Text>
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button className="reblas-btn-1" auto onPress={() => setConfirmDeleteOpen(false)}>
+            Cancel
+          </Button>
+          <Button className="reblas-btn-3" auto onPress={confirmDelete}>
+            Delete
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+{/* Add wash modal */}
+      <Modal
+        closeButton
+        blur
+        aria-label="Add wash"
+        open={addOpen}
+        onClose={() => setAddOpen(false)}
+        width="720px"
+        css={{
+          background: 'rgba(0,0,0,0.22)',
+          border: '1px solid var(--reblas-outline)',
+          backdropFilter: 'blur(14px)',
+          borderRadius: 14,
+        }}
+      >
+        <Modal.Header>
+          <div style={{display: 'flex', flexDirection: 'column', gap: 4, width: '100%'}}>
+            <Text b css={{mb: 0}}>{isEditing ? 'Edit wash' : 'Add wash'}</Text>
+            <Text size="$xs" css={{opacity: 0.75, mb: 0}}>
+              Dirty × (100% − Wash Rate) = Clean
+            </Text>
+          </div>
+        </Modal.Header>
+
+        <Modal.Body>
+          {formErr ? (
+            <div
+              style={{
+                padding: 12,
+                borderRadius: 14,
+                border: '1px solid var(--reblas-outline)',
+                background: 'rgba(120,0,0,0.20)',
+              }}
+            >
+              <Text b css={{mb: 0}}>Error</Text>
+              <Text size="$sm" css={{opacity: 0.9, mb: 0}}>{formErr}</Text>
+            </div>
+          ) : null}
+
+          <Card
+            css={{
+              p: '$8',
+              background: 'rgba(0,0,0,0.26)',
+              border: '1px solid var(--reblas-outline)',
+              borderRadius: 14,
+            }}
+          >
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 180px', gap: 12}}>
+              <div>
+                <Text size="$xs" css={{opacity: 0.75, mb: 6, letterSpacing: '0.06em', textTransform: 'uppercase'}}>
+                  Member
+                </Text>
+                <select
+                  aria-label="Select member"
+                  className="reblas-select"
+                  value={formMemberId}
+                  onChange={(e) => setFormMemberId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    height: 44,
+                    borderRadius: 14,
+                    background: 'rgba(0,0,0,0.28)',
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    color: 'white',
+                    padding: '0 12px',
+                    outline: 'none',
+                  }}
+                >
+                  <option value="">Select a member…</option>
+                  {filteredMembersForWash.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {displayNameOf(m)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <Input
+                aria-label="Wash rate percent"
+                label="Wash Rate %"
+                type="number"
+                min={0}
+                max={100}
+                bordered
+                fullWidth
+                value={String(formWashRate)}
+                onChange={(e) => setFormWashRate(Number(e.target.value))}
+                css={{
+                  '& .nextui-input-wrapper': {
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    boxShadow: 'none',
+                  },
+                }}
+              />
+            </div>
+          </Card>
+
+          <Card
+            css={{
+              p: '$8',
+              background: 'rgba(0,0,0,0.26)',
+              border: '1px solid var(--reblas-outline)',
+              borderRadius: 14,
+            }}
+          >
+            <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12}}>
+              <Input
+                aria-label="Dirty amount"
+                label="Dirty amount"
+                placeholder="e.g. 1000"
+                bordered
+                fullWidth
+                value={formDirty}
+                onChange={(e) => setFormDirty(String(e?.target?.value || '').replace(/[^0-9]/g, ''))}
+                css={{
+                  '& .nextui-input-wrapper': {
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    boxShadow: 'none',
+                  },
+                }}
+              />
+
+              <Input
+                aria-label="Clean amount"
+                label="Clean amount"
+                readOnly
+                bordered
+                fullWidth
+                value={formatCentsWhole(cleanCents)}
+                css={{
+                  '& .nextui-input-wrapper': {
+                    border: '1px solid rgba(255,255,255,0.22)',
+                    boxShadow: 'none',
+                  },
+                }}
+              />
+            </div>
+
+            <Spacer y={0.3} />
+
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                gap: 12,
+                padding: '10px 12px',
+                borderRadius: 14,
+                border: '1px solid var(--reblas-outline)',
+                background: 'rgba(0,0,0,0.22)',
+              }}
+            >
+              <Text size="$xs" css={{opacity: 0.75, mb: 0}}>
+                Preview
+              </Text>
+              <Text size="$xs" css={{opacity: 0.85, mb: 0}}>
+                Dirty: <b>{formatCentsWhole(dirtyCents)}</b> • Clean: <b>{formatCentsWhole(cleanCents)}</b> • Rate:{' '}
+                <b>{Math.max(0, Math.min(100, Math.floor(Number(formWashRate || 0))))}%</b>
+              </Text>
+            </div>
+          </Card>
+        </Modal.Body>
+
+        <Modal.Footer>
+          <Button className="reblas-btn-1" auto onPress={() => setAddOpen(false)} disabled={saving}>
+            Cancel
+          </Button>
+          <Button className="reblas-btn-2" auto onPress={saveUpsert} disabled={saving}>
+            {saving ? 'Saving…' : 'Add'}
+          </Button>
+        </Modal.Footer>
+      </Modal>
+
+    </div>
+  );
+};
+
+export default WashTracker;

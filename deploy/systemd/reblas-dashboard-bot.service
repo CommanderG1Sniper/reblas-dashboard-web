@@ -1,0 +1,23 @@
+[Unit]
+Description=Reblas Dashboard Members Sync Bot
+After=network.target
+
+[Service]
+Type=simple
+User=australis
+Group=australis
+WorkingDirectory=/projects/reblas-crew-dashboard
+Environment=NODE_ENV=production
+Environment=TZ=Australia/Melbourne
+Environment=REBLAS_DATA_DIR=/home/australis/.reblas-dashboard-data
+# Optional: restrict /importprices to one Discord role ID.
+# Environment=PRICE_IMPORT_ROLE_ID=123456789012345678
+EnvironmentFile=-/projects/reblas-crew-dashboard/.env.local
+ExecStart=/usr/bin/npm run bot
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

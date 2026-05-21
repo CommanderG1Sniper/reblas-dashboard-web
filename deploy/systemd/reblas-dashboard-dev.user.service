@@ -1,0 +1,19 @@
+[Unit]
+Description=Reblas Dashboard Dev Web (Next.js, user)
+After=default.target
+
+[Service]
+Type=simple
+WorkingDirectory=/projects/reblas-crew-dashboard
+Environment=NODE_ENV=development
+Environment=TZ=Australia/Melbourne
+Environment=REBLAS_DATA_DIR=%h/.reblas-dashboard-data
+EnvironmentFile=-/projects/reblas-crew-dashboard/.env.local
+ExecStart=/usr/bin/npm run dev:web
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

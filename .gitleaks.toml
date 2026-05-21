@@ -1,0 +1,5 @@
+title = "Reblas Crew Dashboard Gitleaks Config"
+
+[extend]
+useDefault = true
+
